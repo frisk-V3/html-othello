@@ -1,19 +1,16 @@
 import { Board, BLACK, WHITE } from "./board.js";
 import { getLegalMoves, applyMove } from "./rules.js";
 import { render } from "./renderer.js";
-import { cpuChooseMove } from "./ai.js";
+import { cpuChooseMove, recordPlayerMove } from "./ai.js";
 
 let board;
 let currentPlayer = BLACK;
 
-const info = document.getElementById("info");
-const cpuLevelElem = document.getElementById("cpuLevel");
-const restartBtn = document.getElementById("restartBtn");
-
 function updateInfo() {
   const black = board.grid.flat().filter(v => v === BLACK).length;
   const white = board.grid.flat().filter(v => v === WHITE).length;
-  info.textContent = `手番: ${currentPlayer === BLACK ? "黒" : "白"}　黒:${black} 白:${white}`;
+  document.getElementById("info").textContent =
+    `手番: ${currentPlayer === BLACK ? "黒" : "白"}　黒:${black} 白:${white}`;
 }
 
 function nextTurn() {
@@ -22,20 +19,22 @@ function nextTurn() {
   if (getLegalMoves(board, next).length > 0) {
     currentPlayer = next;
   } else if (getLegalMoves(board, currentPlayer).length === 0) {
-    info.textContent += "　→ ゲーム終了";
+    document.getElementById("info").textContent += "　→ ゲーム終了";
     return;
   }
 
   render(board, currentPlayer, onClick);
   updateInfo();
 
-  if (currentPlayer === WHITE && Number(cpuLevelElem.value) > 0) {
+  // CPU
+  const level = Number(document.getElementById("cpuLevel").value);
+  if (currentPlayer === WHITE && level > 0) {
     setTimeout(cpuMove, 300);
   }
 }
 
 function cpuMove() {
-  const level = Number(cpuLevelElem.value);
+  const level = Number(document.getElementById("cpuLevel").value);
   const move = cpuChooseMove(board, level);
   if (!move) return;
 
@@ -49,6 +48,9 @@ function onClick(e) {
 
   if (!getLegalMoves(board, currentPlayer).some(m => m.x === x && m.y === y)) return;
 
+  // 学習
+  recordPlayerMove(x, y);
+
   applyMove(board, x, y, currentPlayer);
   nextTurn();
 }
@@ -60,5 +62,5 @@ function start() {
   updateInfo();
 }
 
-restartBtn.addEventListener("click", start);
+document.getElementById("restartBtn").addEventListener("click", start);
 start();
