@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>オセロ</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<h1>オセロ</h1>
+
+<div id="info"></div>
+
+<div id="controls">
+  <label>CPUレベル:
+    <select id="cpuLevel">
+      <option value="0">なし（2人対戦）</option>
+      <option value="1">かんたん</option>
+      <option value="2">ふつう</option>
+      <option value="3">むずかしい</option>
+    </select>
+  </label>
+  <button id="restartBtn">リスタート</button>
+</div>
+
+<table id="board"></table>
+
+<script type="module" src="js/game.js"></script>
+</body>
+</html>
