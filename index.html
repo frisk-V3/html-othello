@@ -3,12 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <title>オセロ</title>
+
 <style>
 body {
   font-family: system-ui, sans-serif;
   text-align: center;
   background: #f0f0f0;
+  margin: 0;
+  padding: 0;
 }
+h1 { margin-top: 20px; }
+#info { font-size: 18px; margin: 10px 0; }
+#thinking { font-size: 16px; color: #444; height: 22px; margin-bottom: 5px; }
 #board {
   margin: 20px auto;
   border-collapse: collapse;
@@ -28,15 +34,16 @@ body {
   margin: auto;
   margin-top: 4px;
   box-shadow: 0 0 3px rgba(0,0,0,0.5);
+  transform-style: preserve-3d;
+  transition: transform 0.25s ease;
 }
 .black { background: #000; }
 .white { background: #fff; }
+.flip { transform: rotateY(180deg); }
 .hint {
   box-shadow: inset 0 0 0 3px rgba(255,255,0,0.7);
 }
-#controls {
-  margin-top: 10px;
-}
+#controls { margin-top: 10px; }
 button, select {
   padding: 6px 12px;
   margin: 0 4px;
@@ -46,9 +53,10 @@ button, select {
 </head>
 <body>
 
-<h1>オセロ</h1>
+<h1>オセロ（改良版）</h1>
 
 <div id="info"></div>
+<div id="thinking"></div>
 
 <div id="controls">
   <label>CPUレベル:
@@ -56,7 +64,7 @@ button, select {
       <option value="0">なし（2人対戦）</option>
       <option value="1">かんたん</option>
       <option value="2">ふつう</option>
-      <option value="3">むずかしい</option>
+      <option value="3">むずかしい（強化AI）</option>
     </select>
   </label>
   <button id="restartBtn">リスタート</button>
@@ -82,9 +90,14 @@ class Board {
   inBounds(x, y) { return x >= 0 && x < SIZE && y >= 0 && y < SIZE; }
   get(x, y) { return this.grid[y][x]; }
   set(x, y, v) { this.grid[y][x] = v; }
+  clone() {
+    const b = new Board();
+    b.grid = this.grid.map(row => [...row]);
+    return b;
+  }
 }
 
-// ===== ルール =====
+// ===== 方向ベクトル =====
 const DIRS = [
   { dx: 1, dy: 0 }, { dx: -1, dy: 0 },
   { dx: 0, dy: 1 }, { dx: 0, dy: -1 },
@@ -92,11 +105,11 @@ const DIRS = [
   { dx: -1, dy: 1 }, { dx: -1, dy: -1 }
 ];
 
+// ===== 裏返せる数を数える =====
 function countFlips(board, x, y, player) {
   if (board.get(x, y) !== EMPTY) return 0;
   const opponent = player === BLACK ? WHITE : BLACK;
   let total = 0;
-
   for (const { dx, dy } of DIRS) {
     let cx = x + dx, cy = y + dy;
     let count = 0;
@@ -112,20 +125,33 @@ function countFlips(board, x, y, player) {
   return total;
 }
 
+// ===== 合法手（高速版） =====
 function getLegalMoves(board, player) {
-  const moves = [];
+  const opponent = player === BLACK ? WHITE : BLACK;
+  const moves = new Set();
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
-      if (countFlips(board, x, y, player) > 0) moves.push({ x, y });
+      if (board.get(x, y) !== opponent) continue;
+      for (const { dx, dy } of DIRS) {
+        const nx = x + dx, ny = y + dy;
+        if (!board.inBounds(nx, ny)) continue;
+        if (board.get(nx, ny) !== EMPTY) continue;
+        if (countFlips(board, nx, ny, player) > 0) {
+          moves.add(`${nx},${ny}`);
+        }
+      }
     }
   }
-  return moves;
+  return [...moves].map(s => {
+    const [x, y] = s.split(",").map(Number);
+    return { x, y };
+  });
 }
 
+// ===== 手を適用 =====
 function applyMove(board, x, y, player) {
   const opponent = player === BLACK ? WHITE : BLACK;
   board.set(x, y, player);
-
   for (const { dx, dy } of DIRS) {
     let cx = x + dx, cy = y + dy;
     const toFlip = [];
@@ -142,31 +168,94 @@ function applyMove(board, x, y, player) {
 
 // ===== 学習データ =====
 let learnData = loadLearnData();
-
 function loadLearnData() {
-  const data = localStorage.getItem("othello_learn");
+  const data = localStorage.getItem("othello_learn_v2");
   if (data) return JSON.parse(data);
   return Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
 }
-
 function saveLearnData() {
-  localStorage.setItem("othello_learn", JSON.stringify(learnData));
+  localStorage.setItem("othello_learn_v2", JSON.stringify(learnData));
 }
-
 function recordPlayerMove(x, y) {
-  learnData[y][x]++;
+  learnData[y][x] += 1;
+  saveLearnData();
+}
+function recordCpuWin(moves) {
+  for (const {x, y} of moves) learnData[y][x] -= 0.5;
+  saveLearnData();
+}
+function recordCpuLoss(moves) {
+  for (const {x, y} of moves) learnData[y][x] += 0.5;
   saveLearnData();
 }
 
-// ===== CPU =====
+// ===== 評価関数 =====
+const WEIGHTS = [
+  [120, -40, 20, 5, 5, 20, -40, 120],
+  [-40, -60, -5, -5, -5, -5, -60, -40],
+  [20, -5, 15, 3, 3, 15, -5, 20],
+  [5, -5, 3, 3, 3, 3, -5, 5],
+  [5, -5, 3, 3, 3, 3, -5, 5],
+  [20, -5, 15, 3, 3, 15, -5, 20],
+  [-40, -60, -5, -5, -5, -5, -60, -40],
+  [120, -40, 20, 5, 5, 20, -40, 120]
+];
+
+function evaluate(board, player) {
+  const opponent = player === BLACK ? WHITE : BLACK;
+  let score = 0;
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const v = board.get(x, y);
+      if (v === player) score += WEIGHTS[y][x];
+      else if (v === opponent) score -= WEIGHTS[y][x];
+    }
+  }
+  const myMoves = getLegalMoves(board, player).length;
+  const opMoves = getLegalMoves(board, opponent).length;
+  score += (myMoves - opMoves) * 5;
+  return score;
+}
+
+// ===== ミニマックス + αβ枝刈り =====
+function minimax(board, depth, player, maximizing, alpha, beta) {
+  const moves = getLegalMoves(board, player);
+  if (depth === 0 || moves.length === 0) {
+    return evaluate(board, WHITE);
+  }
+  const nextPlayer = player === BLACK ? WHITE : BLACK;
+  if (maximizing) {
+    let maxEval = -Infinity;
+    for (const m of moves) {
+      const b2 = board.clone();
+      applyMove(b2, m.x, m.y, player);
+      const evalScore = minimax(b2, depth - 1, nextPlayer, false, alpha, beta);
+      maxEval = Math.max(maxEval, evalScore);
+      alpha = Math.max(alpha, evalScore);
+      if (beta <= alpha) break;
+    }
+    return maxEval;
+  } else {
+    let minEval = Infinity;
+    for (const m of moves) {
+      const b2 = board.clone();
+      applyMove(b2, m.x, m.y, player);
+      const evalScore = minimax(b2, depth - 1, nextPlayer, true, alpha, beta);
+      minEval = Math.min(minEval, evalScore);
+      beta = Math.min(beta, evalScore);
+      if (beta <= alpha) break;
+    }
+    return minEval;
+  }
+}
+
+// ===== CPUの手選択 =====
 function cpuChooseMove(board, level) {
   const moves = getLegalMoves(board, WHITE);
   if (moves.length === 0) return null;
-
   if (level === 1) {
     return moves[Math.floor(Math.random() * moves.length)];
   }
-
   if (level === 2) {
     return moves
       .map(m => ({
@@ -175,50 +264,51 @@ function cpuChooseMove(board, level) {
       }))
       .sort((a, b) => b.score - a.score)[0];
   }
-
-  if (level === 3) {
-    const corners = moves.filter(m =>
-      (m.x === 0 && m.y === 0) ||
-      (m.x === 7 && m.y === 0) ||
-      (m.x === 0 && m.y === 7) ||
-      (m.x === 7 && m.y === 7)
-    );
-    if (corners.length > 0) return corners[0];
-
-    return moves
-      .map(m => ({
-        ...m,
-        score: countFlips(board, m.x, m.y, WHITE) - learnData[m.y][m.x] * 1.2
-      }))
-      .sort((a, b) => b.score - a.score)[0];
+  let bestMove = null;
+  let bestScore = -Infinity;
+  for (const m of moves) {
+    const b2 = board.clone();
+    applyMove(b2, m.x, m.y, WHITE);
+    const score =
+      minimax(b2, 3, BLACK, false, -Infinity, Infinity) -
+      learnData[m.y][m.x] * 1.0;
+    if (score > bestScore) {
+      bestScore = score;
+      bestMove = m;
+    }
   }
-
-  return null;
+  return bestMove;
 }
 
-// ===== 描画 =====
+// ===== 描画・アニメーション =====
+let lastBoard = null;
+function discNeedsFlip(x, y) {
+  if (!lastBoard) return false;
+  return lastBoard[y][x] !== EMPTY && lastBoard[y][x] !== board.get(x, y);
+}
+function saveBoardState(board) {
+  lastBoard = board.grid.map(row => [...row]);
+}
+
 function render(board, currentPlayer, onClick) {
   const table = document.getElementById("board");
   table.innerHTML = "";
-
   const legal = getLegalMoves(board, currentPlayer);
-
   for (let y = 0; y < SIZE; y++) {
     const tr = document.createElement("tr");
     for (let x = 0; x < SIZE; x++) {
       const td = document.createElement("td");
       td.dataset.x = x;
       td.dataset.y = y;
-
       const cell = board.get(x, y);
       if (cell === BLACK || cell === WHITE) {
         const disc = document.createElement("div");
         disc.classList.add("disc", cell === BLACK ? "black" : "white");
+        if (discNeedsFlip(x, y)) disc.classList.add("flip");
         td.appendChild(disc);
       } else if (legal.some(m => m.x === x && m.y === y)) {
         td.classList.add("hint");
       }
-
       td.addEventListener("click", onClick);
       tr.appendChild(td);
     }
@@ -226,45 +316,80 @@ function render(board, currentPlayer, onClick) {
   }
 }
 
-// ===== ゲーム制御 =====
-let board;
-let currentPlayer = BLACK;
-
-const infoElem = document.getElementById("info");
-const cpuLevelElem = document.getElementById("cpuLevel");
-const restartBtn = document.getElementById("restartBtn");
-
 function updateInfo() {
   const flat = board.grid.flat();
   const black = flat.filter(v => v === BLACK).length;
   const white = flat.filter(v => v === WHITE).length;
+  const infoElem = document.getElementById("info");
   infoElem.textContent =
     `手番: ${currentPlayer === BLACK ? "黒" : "白"}　黒:${black} 白:${white}`;
 }
+function showThinking(flag) {
+  const elem = document.getElementById("thinking");
+  elem.textContent = flag ? "CPU 思考中…" : "";
+}
+
+// ===== ゲーム制御 =====
+let board;
+let currentPlayer = BLACK;
+let cpuMovesHistory = [];
+
+const cpuLevelElem = document.getElementById("cpuLevel");
+const restartBtn = document.getElementById("restartBtn");
+
+function isGameOver() {
+  return getLegalMoves(board, BLACK).length === 0 &&
+         getLegalMoves(board, WHITE).length === 0;
+}
+
+function finishGame() {
+  const flat = board.grid.flat();
+  const black = flat.filter(v => v === BLACK).length;
+  const white = flat.filter(v => v === WHITE).length;
+  let result = "";
+  if (black > white) {
+    result = "黒の勝ち！";
+    recordCpuLoss(cpuMovesHistory);
+  } else if (white > black) {
+    result = "白の勝ち！（CPU）";
+    recordCpuWin(cpuMovesHistory);
+  } else {
+    result = "引き分け";
+  }
+  const infoElem = document.getElementById("info");
+  infoElem.textContent += `　→ ゲーム終了 (${result})`;
+}
 
 function nextTurn() {
+  saveBoardState(board);
   const next = currentPlayer === BLACK ? WHITE : BLACK;
-
   if (getLegalMoves(board, next).length > 0) {
     currentPlayer = next;
   } else if (getLegalMoves(board, currentPlayer).length === 0) {
-    infoElem.textContent += "　→ ゲーム終了";
+    render(board, currentPlayer, onClick);
+    updateInfo();
+    finishGame();
     return;
   }
-
   render(board, currentPlayer, onClick);
   updateInfo();
-
   const level = Number(cpuLevelElem.value);
   if (currentPlayer === WHITE && level > 0) {
-    setTimeout(cpuMove, 300);
+    showThinking(true);
+    setTimeout(cpuMove, 200);
   }
 }
 
 function cpuMove() {
   const level = Number(cpuLevelElem.value);
   const move = cpuChooseMove(board, level);
-  if (!move) return;
+  showThinking(false);
+  if (!move) {
+    if (isGameOver()) finishGame();
+    else nextTurn();
+    return;
+  }
+  cpuMovesHistory.push({x: move.x, y: move.y});
   applyMove(board, move.x, move.y, WHITE);
   nextTurn();
 }
@@ -272,13 +397,9 @@ function cpuMove() {
 function onClick(e) {
   const x = Number(e.currentTarget.dataset.x);
   const y = Number(e.currentTarget.dataset.y);
-
-  if (!getLegalMoves(board, currentPlayer).some(m => m.x === x && m.y === y)) return;
-
-  if (currentPlayer === BLACK) {
-    recordPlayerMove(x, y);
-  }
-
+  const legal = getLegalMoves(board, currentPlayer);
+  if (!legal.some(m => m.x === x && m.y === y)) return;
+  if (currentPlayer === BLACK) recordPlayerMove(x, y);
   applyMove(board, x, y, currentPlayer);
   nextTurn();
 }
@@ -286,8 +407,11 @@ function onClick(e) {
 function start() {
   board = new Board();
   currentPlayer = BLACK;
+  cpuMovesHistory = [];
+  lastBoard = null;
   render(board, currentPlayer, onClick);
   updateInfo();
+  showThinking(false);
 }
 
 restartBtn.addEventListener("click", start);
